@@ -1,0 +1,23 @@
+Package: ktvgraph
+Title: Learning time-varying graphs for financial markets
+Version: 0.1.0
+Description: Learning time-varying graphs for financial markets 
+Author: Amirhossein Javaheri
+License: GPL-3 | file LICENSE
+Encoding: UTF-8
+LazyData: true
+Depends: spectralGraphTopology, devtools
+LinkingTo:
+    Rcpp,
+    RcppEigen
+Imports:
+    Rcpp,
+    MASS,
+    progress,
+    igraph,
+    spectralGraphTopology,
+    mvtnorm,
+    testthat
+RoxygenNote: 7.2.2
+Remotes:
+Suggests:
