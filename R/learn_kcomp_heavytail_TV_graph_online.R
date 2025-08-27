@@ -136,6 +136,7 @@ learn_kcomp_heavytail_TV_graph_online <- function(X, w_lagged = 0,
         for (q in 1:T_n)
           LstarSweighted <- LstarSweighted + LstarSq[[q]]
       }
+      
       grad <- LstarSweighted/T_n + Lstar(eta * crossprod(t(U)) + Phi - rho * Theta) + rho * (LstarLw )
       grad <- grad - mu_vec - rho*(u+a*w_lagged) +  Dstar(z - rho * d) + rho *  DstarDw
       ratio <- 1 / (rho*(4*p-1))
