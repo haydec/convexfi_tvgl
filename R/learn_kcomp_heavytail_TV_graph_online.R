@@ -125,28 +125,26 @@ learn_kcomp_heavytail_TV_graph_online <- function(X, w_lagged = 0,
     
 
     for (j in 1:1){
-      # update w
-      LstarLw <- Lstar(Lw)
-      DstarDw <- Dstar(diag(Lw))
-      LstarSweighted <- rep(0, .5*p*(p-1))
-      if (heavy_type == "student") {
-        for (q in 1:T_n)
-          LstarSweighted <- LstarSweighted + LstarSq[[q]] * compute_student_weights(w, LstarSq[[q]], p, nu)
-      } else if (heavy_type == "gaussian") {
-        for (q in 1:T_n)
-          LstarSweighted <- LstarSweighted + LstarSq[[q]]
-      }
-      
-      grad <- LstarSweighted/T_n + Lstar(eta * crossprod(t(U)) + Phi - rho * Theta) + rho * (LstarLw )
-      grad <- grad - mu_vec - rho*(u+a*w_lagged) +  Dstar(z - rho * d) + rho *  DstarDw
-      ratio <- 1 / (rho*(4*p-1))
-      wi <- (1-rho*ratio)*w - ratio *  grad
-      thr <- sqrt( 2*beta *ratio )
-      wi[wi< thr] <- 0
-      Lwi <- L(wi)
-      Awi <- A(wi)
-      
-      
+        # update w
+        LstarLw <- Lstar(Lw)
+        DstarDw <- Dstar(diag(Lw))
+        LstarSweighted <- rep(0, .5*p*(p-1))
+        if (heavy_type == "student") {
+          for (q in 1:T_n)
+            LstarSweighted <- LstarSweighted + LstarSq[[q]] * compute_student_weights(w, LstarSq[[q]], p, nu)
+        } else if (heavy_type == "gaussian") {
+          for (q in 1:T_n)
+            LstarSweighted <- LstarSweighted + LstarSq[[q]]
+        }
+        
+        grad <- LstarSweighted/T_n + Lstar(eta * crossprod(t(U)) + Phi - rho * Theta) + rho * (LstarLw )
+        grad <- grad - mu_vec - rho*(u+a*w_lagged) +  Dstar(z - rho * d) + rho *  DstarDw
+        ratio <- 1 / (rho*(4*p-1))
+        wi <- (1-rho*ratio)*w - ratio *  grad
+        thr <- sqrt( 2*beta *ratio )
+        wi[wi< thr] <- 0
+        Lwi <- L(wi)
+        Awi <- A(wi)   
     }
 
     # Update u
@@ -292,4 +290,9 @@ softThresh <- function(v, thr){
   temp <- temp * (temp>0)
   return( sign(v) * temp )
   
+}
+
+# Added by Me 
+compute_student_weights <- function(w, LstarSq, p, nu) {
+  return((p + nu) / (sum(w * LstarSq) + nu))
 }
