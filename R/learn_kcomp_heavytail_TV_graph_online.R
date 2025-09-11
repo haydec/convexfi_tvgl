@@ -137,7 +137,7 @@ learn_kcomp_heavytail_TV_graph_online <- function(X, w_lagged = 0,
             LstarSweighted <- LstarSweighted + LstarSq[[q]]
         }
         
-        grad <- LstarSweighted/T_n + Lstar(eta * crossprod(t(U)) + Phi - rho * Theta) + rho * (LstarLw )
+        grad <- LstarSweighted/T_n + Lstar( eta * crossprod(t(U)) + Phi - rho * Theta ) + rho * (LstarLw )
         grad <- grad - mu_vec - rho*(u+a*w_lagged) +  Dstar(z - rho * d) + rho *  DstarDw
         ratio <- 1 / (rho*(4*p-1))
         wi <- (1-rho*ratio)*w - ratio *  grad
@@ -148,7 +148,7 @@ learn_kcomp_heavytail_TV_graph_online <- function(X, w_lagged = 0,
     }
 
     # Update u
-    u <- wi - a*w_lagged - mu_vec/rho
+    u <- iw - a*w_lagged - mu_vec/rho
     thr <- alpha/(rho)
     u <- softThresh(u, thr)
     
