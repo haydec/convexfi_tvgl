@@ -148,7 +148,7 @@ learn_kcomp_heavytail_TV_graph_online <- function(X, w_lagged = 0,
     }
 
     # Update u
-    u <- iw - a*w_lagged - mu_vec/rho
+    u <- wi - a*w_lagged - mu_vec/rho
     thr <- alpha/(rho)
     u <- softThresh(u, thr)
     
@@ -232,6 +232,8 @@ learn_kcomp_heavytail_TV_graph_online <- function(X, w_lagged = 0,
       }
       eta_seq <- c(eta_seq, eta)
     }
+
+
     if (verbose)
       pb$tick()
     
