@@ -1,7 +1,10 @@
+import math
 import numpy as np
 from sklearn.preprocessing import scale
 from numpy.linalg import slogdet
 from scipy.special import digamma, polygamma, gammaln
+from functools import lru_cache
+
 
 # ===========================================================================
 # ===========================================================================
@@ -55,6 +58,7 @@ def W_init(M):
     W0[W0 < 0] = 0
     return W0
 
+'''
 def L_star(Y):
 
     Y = np.asarray(Y)
@@ -74,6 +78,48 @@ def L_star(Y):
 
 
     return Lstar
+'''
+
+
+
+@lru_cache(maxsize=None)
+def _lower_pairs_columnwise(p: int):
+    """
+    Return (i_idx, j_idx) for all i>j, ordered by increasing j, then i.
+    This matches k = (i-j) + ((j-1)/2)*(2p - j) in your original code.
+    """
+    i_all, j_all = np.tril_indices(p, k=-1)     # default order: row-major (by i)
+    order = np.lexsort((i_all, j_all))          # sort by j first, then i
+    return i_all[order], j_all[order]
+
+def L_star(Y: np.ndarray, *, assume_symmetric: bool = False) -> np.ndarray:
+    """
+    Vectorized L* operator:
+        for each edge (i>j): L*[Y]_{ij} = Y_ii - Y_ij - Y_ji + Y_jj
+    If Y is symmetric, this simplifies to: diag_i + diag_j - 2*Y_ij.
+
+    Returns a length m = p*(p-1)//2 vector ordered column-wise by j (to match your k).
+    """
+    Y = np.asarray(Y)
+    if Y.ndim != 2 or Y.shape[0] != Y.shape[1]:
+        raise ValueError("Y must be a square matrix.")
+    p = Y.shape[0]
+    m = p * (p - 1) // 2
+
+    # indices of all (i,j) with i>j, ordered like your original k
+    i_idx, j_idx = _lower_pairs_columnwise(p)
+
+    d = np.diag(Y)
+    if assume_symmetric:
+        # Y_ji == Y_ij, so formula reduces and avoids extra gather:
+        v = d[i_idx] + d[j_idx] - 2.0 * Y[i_idx, j_idx]
+    else:
+        v = d[i_idx] - Y[i_idx, j_idx] - Y[j_idx, i_idx] + d[j_idx]
+
+    # already in desired order (column-wise by j)
+    # shape is (m,)
+    return v
+
 
 def A_from_w(w):
 
@@ -150,128 +196,148 @@ def D_from_w(w: np.ndarray) -> np.ndarray:
 # Reference
 # https://zouyuxin.github.io/Note/EMtDistribution.pdf
 # https://shoichimidorikawa.github.io/Lec/ProbDistr/t-e.pdf
+# https://github.com/convexfi/fitHeavyTail/blob/master/R/fit_mvt.R
+
+
+def nu_mle_diag_resampled(X, *, fT_resampling=4, N_resampling_factor=1.2,
+                          nu_min=2.5, nu_max=100.0, random_state=None):
+    X = np.asarray(X, dtype=float)
+    T, N = X.shape
+    rng = np.random.default_rng(random_state)
+    mu = X.mean(axis=0)
+    Xc = X - mu
+    var = (Xc**2).sum(axis=0) / (T - 1)
+    if np.any(var <= 0):
+        raise ValueError("Non-positive variance encountered.")
+
+    delta2_var = Xc**2 / var
+    Tf = T * fT_resampling
+    delta_rep = np.tile(delta2_var, (fT_resampling, 1))
+    N_resampling = int(round(N_resampling_factor * N))
+    idx = rng.integers(0, N, size=(Tf, N_resampling))
+    delta2_cov = delta_rep[np.arange(Tf)[:, None], idx].sum(axis=1)
+
+    def negLL(nu: float) -> float:
+        if nu <= 2.0: return np.inf
+        term1 = (N * Tf) * 0.5 * (math.log((nu - 2.0) / nu))
+        scaled = nu + (nu / (nu - 2.0)) * delta2_cov
+        if np.any(scaled <= 0): return np.inf
+        term2 = ((N + nu) * 0.5) * np.log(scaled).sum()
+        term3 = -Tf * math.lgamma((N + nu) * 0.5)
+        term4 =  Tf * math.lgamma(nu * 0.5)
+        term5 = -(nu * Tf * 0.5) * math.log(nu)
+        return term1 + term2 + term3 + term4 + term5
+
+    def golden_section_minimize(f, a, b, tol=1e-5, max_iter=200):
+        invphi = (math.sqrt(5) - 1) / 2
+        invphi2 = (3 - math.sqrt(5)) / 2
+        c = a + invphi2 * (b - a); d = a + invphi * (b - a)
+        fc, fd = f(c), f(d)
+        for _ in range(max_iter):
+            if abs(b - a) < tol * (abs(a) + abs(b)): break
+            if fc < fd:
+                b, d, fd = d, c, fc
+                c = a + invphi2 * (b - a); fc = f(c)
+            else:
+                a, c, fc = c, d, fd
+                d = a + invphi * (b - a); fd = f(d)
+        return c if fc < fd else d
+
+    return float(golden_section_minimize(negLL, nu_min, nu_max))
+
+# --- EM fit of mu and full Sigma with fixed nu (no missing data, no factor model) ---
 def fit_multivariate_t(
     X,
-    nu_init=10.0,
-    max_iter=200,
-    tol=1e-6,
-    fix_nu=None,
-    jitter=1e-6, 
-    verbose=False,
+    nu: float | None = None,
+    *,
+    estimate_nu: bool = True,
+    nu_min: float = 2.5,
+    nu_max: float = 100.0,
+    max_iter: int = 200,
+    ptol: float = 1e-3,
+    px_em: bool = True,
+    jitter: float = 1e-9,
+    random_state: int | None = None
 ):
     """
-    
-    Estimate (mu, Sigma, nu) for a multivariate Student's t via EM.
+    EM updates for mu and full scatter Sigma of a multivariate t with fixed nu.
+    If estimate_nu=True and nu is None, nu is obtained with diag-resampled MLE (one-shot).
 
-    Parameters
-    ----------
-    X : array, shape (n_samples, n_features)
-        Data.
-    nu_init : float
-        Initial degrees of freedom (ignored if fix_nu is not None).
-    max_iter : int
-        Maximum EM iterations.
-    tol : float
-        Relative tolerance on log-likelihood for convergence.
-    fix_nu : float or None
-        If set, keep nu fixed at this value.
-    jitter : float
-        Diagonal jitter multiplier for numerical stability.
-    verbose : bool
-        Print progress if True.
-
-    Returns
-    -------
-    mu : array, shape (p,)
-    Sigma : array, shape (p, p)
-    nu : float
-    history : dict with 'loglik'
+    Returns:
+        dict(mu, Sigma(scatter), cov, nu, converged, num_iterations)
     """
-    X = np.asarray(X)
-    n, p = X.shape
+    X = np.asarray(X, dtype=float)
+    if X.ndim != 2:
+        raise ValueError("X must be 2D (T x N).")
+    T, N = X.shape
+    if T <= N:
+        raise ValueError("Need T > N.")
 
-    # Initialize
+    # 1) One-shot nu (if requested)
+    if estimate_nu and (nu is None):
+        nu = nu_mle_diag_resampled(X, nu_min=nu_min, nu_max=nu_max, random_state=random_state)
+    if nu is None:
+        raise ValueError("nu must be provided or estimate_nu=True.")
+
+    # 2) Initialize mu, Sigma like in R (scatter from sample cov)
     mu = X.mean(axis=0)
-    # sample covariance (unbiased=False), add tiny jitter
-    centered0 = X - mu
-    Sigma = centered0.T @ centered0 / n
-    Sigma += np.eye(p) * (jitter * np.trace(Sigma) / p + 1e-12)
-    nu = float(nu_init if fix_nu is None else fix_nu)
+    Xc = X - mu
+    cov_sample = (Xc.T @ Xc) / (T - 1)                # sample covariance
+    Sigma = ((max(nu, 2.1) - 2.0) / max(nu, 2.1)) * cov_sample  # scatter init
 
-    def mahal_sq(Sigma, X, mu):
-        # δ_i = (x_i - mu)^T Sigma^{-1} (x_i - mu)
-        L = np.linalg.cholesky(Sigma)
-        Y = np.linalg.solve(L, (X - mu).T)   # shape (p, n)
-        return np.sum(Y * Y, axis=0)         # shape (n,)
-
-    def loglik(mu, Sigma, nu):
-        # log-likelihood of multivariate t
-        sgn, logdet = slogdet(Sigma)
-        if sgn <= 0:
-            return -np.inf
-        delta = mahal_sq(Sigma, X, mu)
-        term1 = gammaln((nu + p) / 2) - gammaln(nu / 2)
-        term2 = - (p / 2) * np.log(nu * np.pi) - 0.5 * logdet
-        term3 = - ((nu + p) / 2) * np.log1p(delta / nu)
-        return np.sum(term1 + term2 + term3)
-
-    ll_old = -np.inf
-    history = {'loglik': []}
+    # 3) EM loop
+    def fnu(nu):  # used in R stopping crit
+        return nu / (nu - 2.0)
 
     for it in range(1, max_iter + 1):
+        mu_old = mu.copy()
+        Sigma_old = Sigma.copy()
+
         # E-step
-        delta = mahal_sq(Sigma, X, mu)
-        w = (nu + p) / (nu + delta)  # E[lambda_i | x_i]
-        eloglam = digamma((nu + p) / 2) - np.log((nu + delta) / 2)  # E[log lambda_i | x_i]
+        # r2_t = x_c^T Sigma^{-1} x_c   for each row
+        # add tiny jitter to ensure SPD in solve
+        Sigma_j = Sigma + jitter * np.eye(N)
+        Sinv = np.linalg.inv(Sigma_j)
+        Xc = X - mu  # current centering
+        r2 = np.einsum("ti,ij,tj->t", Xc, Sinv, Xc)   # shape (T,)
+        E_tau = (N + nu) / (nu + r2)                  # shape (T,)
 
-        # M-step: mu (weighted mean)
-        sumw = w.sum()
-        mu = (w[:, None] * X).sum(axis=0) / sumw
+        ave_E_tau = E_tau.mean()
+        ave_E_tau_X = (E_tau[:, None] * X).mean(axis=0)  # (1/T) * sum_t E_tau_t * x_t
 
-        # M-step: Sigma
+        # M-step
+        mu = ave_E_tau_X / ave_E_tau
         Xc = X - mu
-        Sigma = (Xc.T * w) @ Xc / n
-        # stabilize
-        Sigma += np.eye(p) * (jitter * np.trace(Sigma) / p + 1e-12)
+        # (1/T) * Xc^T diag(E_tau) Xc
+        Sigma = (Xc.T * E_tau) @ Xc / T
+        if px_em:
+            Sigma = Sigma / ave_E_tau  # PX-EM acceleration (alpha = ave_E_tau)
 
-        # M-step: nu (solve for root of dQ/dnu = 0) unless fixed
-        if fix_nu is None:
-            # f(nu) = log(nu/2) - psi(nu/2) + 1 + (1/n) * sum(E[log lambda_i] - E[lambda_i]) = 0
-            c = (eloglam.mean() - w.mean())
+        # stopping: relative change of mu and Sigma
+        mu_denom = np.maximum(1.0, np.abs(mu_old) + np.abs(mu))
+        mu_conv = np.all(np.abs(mu - mu_old) <= 0.5 * ptol * mu_denom)
 
-            def f(nu_):
-                return np.log(nu_ / 2.0) - digamma(nu_ / 2.0) + 1.0 + c
+        Sig_denom = np.maximum(1.0, np.abs(Sigma_old) + np.abs(Sigma))
+        Sig_conv = np.all(np.abs(Sigma - Sigma_old) <= 0.5 * ptol * Sig_denom)
 
-            def fprime(nu_):
-                return 1.0 / nu_ - 0.5 * polygamma(1, nu_ / 2.0)
+        if mu_conv and Sig_conv:
+            converged = True
+            break
+    else:
+        converged = False
+        it = max_iter
 
-            # Newton update with simple guarding
-            nu_new = max(nu, 2.01)  # keep > 2 so covariance exists
-            for _ in range(30):
-                val = f(nu_new)
-                der = fprime(nu_new)
-                step = val / der
-                nu_new = nu_new - step
-                if nu_new < 2.01:
-                    nu_new = 2.01
-                if abs(step) / nu_new < 1e-6:
-                    break
-            nu = float(nu_new)
-        else:
-            nu = float(fix_nu)
+    # covariance from scatter
+    cov = (nu / (nu - 2.0)) * Sigma if nu > 2 else np.full_like(Sigma, np.nan)
 
-        # Evaluate log-likelihood and check convergence
-        ll = loglik(mu, Sigma, nu)
-        history['loglik'].append(ll)
-        if verbose:
-            print(f"iter {it:3d}: ll={ll:.6f}, nu={nu:.4f}")
-
-        if np.isfinite(ll_old):
-            if abs(ll - ll_old) / (abs(ll_old) + 1e-12) < tol:
-                break
-        ll_old = ll
-
-    return mu, Sigma, nu, history
+    return {
+        "mu": mu,
+        "Sigma": Sigma,   # scatter
+        "cov": cov,       # covariance
+        "nu": nu,
+        "converged": converged,
+        "num_iterations": it,
+    }
 
 # ===========================================================================
 # ===========================================================================
@@ -347,7 +413,7 @@ def L_update( wUpdate, Phi_n, rho, k):
     return L_nUpdate
 
 
-def w_update(X, w, w_lagged, a, nu, L_n, u_n, mu_vec, z_n, Phi_n, V, rho, d, eta, beta):
+def w_update(X, w, w_lagged, a, nu, LstarXsq, L_n, u_n, mu_vec, z_n, Phi_n, V, rho, d, eta, beta):
     '''
     X:           (n_samples, n_features)        Data Array For Window (Frame) Length
 
@@ -357,6 +423,7 @@ def w_update(X, w, w_lagged, a, nu, L_n, u_n, mu_vec, z_n, Phi_n, V, rho, d, eta
     u_n:         (n_features*(n_features-1)/2)  Temporal Consistency Parameter
     mu_vec:      (n_features*(n_features-1)/2)  Temporal Consistency Parameter Dual
 
+    LstarXsq:    (n_features, n_features)       Current weight Converted to Laplacian Matrix
     L_n:         (n_features, n_features)       Updated Laplacian Constrained Graph Matrix
     Phi_n:       (n_features, n_features)       Laplacian Constrained Graph Matrix Dual
     
@@ -377,27 +444,28 @@ def w_update(X, w, w_lagged, a, nu, L_n, u_n, mu_vec, z_n, Phi_n, V, rho, d, eta
     p = X.shape[1]   # Number Of Features
 
     Lw = L_from_w(w) # (n_features, n_features) Laplacian with current weights
-
+    LstarLw = L_star(Lw)
+    DstarDw = D_star(D_from_w(w))
+    #print("LstarLw: ",LstarLw)
+    #print("DstarDw: ",DstarDw)
     S_tilde = np.repeat(0, .5*p*(p-1))
 
     for t in range(T_n):
-        x = X[t, :]
-        S_tilde = S_tilde + L_star(np.outer(x, x)) * ( (p + nu) / ( L_star(x.T * Lw * x)  + nu ) )
+        S_tilde = S_tilde + LstarXsq[t] * ( (p + nu) / ( ( w @ LstarXsq[t] ) + nu ) )
+    #print("S_tilde",S_tilde)
 
-
-    a_w = S_tilde/T_n + L_star(eta * (V @ V.T) + Phi_n + rho * (Lw -L_n))
-
-    d_vec = np.full(p, d, dtype=float) if np.ndim(d) == 0 else d
-    b_w = -mu_vec - rho * (u_n + a * w_lagged) + D_star(z_n - rho * (d_vec - D_from_w(w)))
+    a_w = S_tilde/T_n + L_star(eta * (V @ V.T) + Phi_n - rho*L_n ) + rho*LstarLw
+    b_w = -mu_vec - rho*(u_n + a * w_lagged) + D_star(z_n - rho*d) + rho*DstarDw
  
 
     ratio = 1 / (rho*(4*p-1))
     c_w = (1-rho*ratio)*w - ratio *  (a_w + b_w)
 
     thr = np.sqrt( 2*beta *ratio )
-    w_new = np.multiply(c_w > thr, c_w)
-
-    return w_new
+    w_new = np.multiply(c_w > thr, c_w)     # (n_features*(n_features-1)/2)  Updated Graph Weights for current Frame
+    Lw_new = L_from_w(w_new)                # (n_features, n_features)       Updated weights Converted to Laplacian Matrix
+    Aw_new = A_from_w(w_new)                # (n_features, n_features)       Updated weights Converted to Adjacency Matrix
+    return w_new, Lw_new, Aw_new
 
 
 
