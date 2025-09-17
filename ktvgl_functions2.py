@@ -587,9 +587,9 @@ def residual_Update( rho, L_n, L_nUpdate, Phi_n_res, z_n_res, primal_lap_residua
     return primal_lap_residual, primal_deg_residual, dual_residual
 
 
-def updateADMMpenalties( update_rho, rho, rho_seq, L_n, k, wUpdate, update_eta, eta, eta_seq, early_stopping):
+def updateADMMpenalties( update_rho, rho, rho_seq, L_n, k, wUpdate, update_eta, eta, eta_seq, early_stopping,has_converged):
 
-    has_converged = False 
+   
     # update rho
     if update_rho: 
 
@@ -660,3 +660,80 @@ def update_parameters( L_nUpdate, wUpdate, u_nUpdate, aUpdate, vUpdate, Phi_nUpd
     z_n = z_nUpdate
 
     return  L_n, w, u_n, a, V, Phi_n, mu_vec, z_n
+
+
+
+
+def compute_augmented_lagrangian(lagrangian,
+    w, LstarSq, Theta, U, Phi, z, d, heavy_type, T_n, p, k, rho, eta, nu,
+    w_lagged, u, mu_vec, alpha, beta, a, gamma
+):
+    """
+
+    """
+
+    # Laplacian and degrees
+    Lw = L_from_w(w)              # (p, p)
+    Dw = D_from_w(w)              # (p,)
+
+    # ----- data-fit term u_func -----
+    u_func = 0.0
+    if heavy_type == "student":
+        
+        for q in range(T_n):
+            u_func = u_func + (p + nu) * np.log(1.0 + np.sum(w * LstarSq[q]) / nu)
+
+    elif heavy_type == "gaussian":
+    
+        for q in range(T_n):
+            u_func = u_func + np.sum(w * LstarSq[q])
+        
+    else:
+        raise ValueError("heavy_type must be 'student' or 'gaussian'")
+    
+    u_func = u_func/T_n
+
+    eigvals = np.linalg.eigvalsh(Theta)   # ascending
+    eig_desc = eigvals[::-1]              # descending
+    eig = eig_desc[: (p - k)]
+    neg_log_det_partial = -np.sum(np.log(eig))
+
+    # ----- eta * sum(w * Lstar(U U^T)) -----
+    rank_ctrl = eta * np.dot(w, L_star(U @ U.T))
+
+    # ----- sparsity/penalty terms -----
+    sparsity0 = beta  * np.count_nonzero(w > 0)     # sum(w > 0)
+    l1_u      = alpha * np.sum(np.abs(u))
+    l1_a      = gamma * np.sum(a)
+
+    # ----- linear aug terms -----
+    # d can be scalar or length-p vector
+    d_vec = np.full(p, d, dtype=float) if np.ndim(d) == 0 else np.asarray(d, float)
+
+    deg_linear = float(np.dot(z, (Dw - d_vec)))
+    u_linear   = float(np.dot(mu_vec, (u - w + a * w_lagged)))
+    lap_linear = float(np.sum(Phi * (Lw - Theta)))   # Frobenius inner product
+
+    # ----- quadratic penalties -----
+    deg_quad = np.linalg.norm(Dw - d_vec, 2)**2
+    u_quad   = np.linalg.norm(u - w + a * w_lagged, 2)**2
+    lap_quad = np.linalg.norm(Lw - Theta, 'fro')**2
+
+    # ----- Lagragian for this iteration -----
+    val = (
+        u_func
+        + neg_log_det_partial
+        + rank_ctrl
+        + sparsity0
+        + l1_u
+        + l1_a
+        + deg_linear
+        + 0.5 * rho * (
+            deg_quad
+            + u_linear + 0.5 * rho * u_quad
+            + lap_linear + 0.5 * rho * lap_quad
+        )
+    )
+    lagrangian = np.hstack((lagrangian, val ))
+    return lagrangian
+

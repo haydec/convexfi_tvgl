@@ -144,7 +144,7 @@ learn_kcomp_heavytail_TV_graph_online <- function(X, w_lagged = 0,
 
   for (i in 1:maxiter) {
     
-    print(cat("iter: ", i))
+    #print(cat("iter: ", i))
     for (j in 1:1){
         # update w
         LstarLw <- Lstar(Lw)
@@ -316,7 +316,7 @@ learn_kcomp_heavytail_TV_graph_online <- function(X, w_lagged = 0,
     
     Theta <- Thetai
   }
-  print(c("maxiter",maxiter))
+  #print(c("maxiter",maxiter))
   results <- list(laplacian = L(wi), adjacency = A(wi), weights = wi, theta = Thetai, maxiter = i,
                   convergence = has_converged, eta_seq = eta_seq,
                   primal_lap_residual = primal_lap_residual,
@@ -331,6 +331,8 @@ compute_augmented_lagrangian_kcomp_mine <- function(w, LstarSq, Theta, U, Phi, z
   eig <- eigen(Theta, symmetric = TRUE, only.values = TRUE)$values[1:(p-k)]
   Lw <- L(w)
   Dw <- diag(Lw)
+  print("Lw")
+  print(Lw)
   u_func <- 0
   if (heavy_type == "student") {
     for (q in 1:T_n)
@@ -340,6 +342,8 @@ compute_augmented_lagrangian_kcomp_mine <- function(w, LstarSq, Theta, U, Phi, z
       u_func <- u_func + sum( w * LstarSq[[q]])
   }
   u_func <- u_func/T_n
+  print(cat("u_func",u_func))
+  
   return(u_func - sum(log(eig))
          + eta * sum(w * Lstar(crossprod(t(U))))
          + beta* sum(w>0)
